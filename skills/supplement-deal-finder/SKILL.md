@@ -51,10 +51,12 @@ Take up to 5 hits and try the same Hebrew category query at each store's `websit
 
 ### Step 2 — Fire all three lanes in parallel
 
-- **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; produces the ranked list with ₪/100g already computed.
-- **Lane A — iHerb IL:** WebFetch the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.); for each top product capture name, brand, size, price in ILS. If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
-- **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. Pull the model-page price range and the cheapest 3 vendors.
-- **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits via Tavily or homepage form. Cap 2 products per discovered store. Skip silently if nothing parseable.
+**For every product captured, the direct product URL is mandatory** (see § Link-capture rules below). If a fetch returns a price but no resolvable URL, drop the row — a row without a link is useless to the user.
+
+- **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; use the URL-extraction variant of the scrape (the second `perl -0777` block) so each row carries its `data-url`. For bundle URLs, use the canonical bundle table.
+- **Lane A — iHerb IL:** WebFetch the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.); for each top product capture name, brand, size, price in ILS, **and the product-page URL** (typically `il.iherb.com/pr/...`). If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
+- **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. From the Zap model page, capture for each top vendor: vendor name, price, **and the click-through URL to the vendor's own product page** (the link Zap labels "לרכישה" / "לאתר המוכר"). The Zap model page itself is also useful — include it as a secondary "see-all-vendors" link in the row notes, but the ranking link must be the direct vendor URL so the user can complete the purchase in one click.
+- **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits via Tavily or homepage form. Cap 2 products per discovered store. **Every row must include the direct product URL**; skip silently if a hit doesn't yield one.
 
 ### Step 3 — Normalize sizes
 
@@ -89,17 +91,19 @@ site:<retailer-domain> <category-hebrew> מארז זוגי
 
 Single ranked table across **all** retailers, cheapest ₪/100g first. Columns:
 
-| Column | Notes |
-|---|---|
-| # | Rank |
-| Retailer | Teva Bari / iHerb / Zap-cheapest / … |
-| Product | Brand + product name |
-| Type | concentrate / isolate / blend / vegan / casein / creatine-mono / etc. |
-| Size | g (combined for bundles) |
-| Price | ₪ inc. VAT |
-| ₪/100g | recomputed |
-| Link | direct product URL |
-| Notes | `USD→ILS @ rate`, `parallel import`, `shrunk from Xkg`, `bundle ×2`, … |
+| Column | Required | Notes |
+|---|---|---|
+| # | ✓ | Rank |
+| Retailer | ✓ | Teva Bari / iHerb / Zap-cheapest / … |
+| Product | ✓ | Brand + product name |
+| Type | ✓ | concentrate / isolate / blend / vegan / casein / creatine-mono / etc. |
+| Size | ✓ | g (combined for bundles) |
+| Price | ✓ | ₪ inc. VAT |
+| ₪/100g | ✓ | recomputed |
+| **Link** | **✓ MANDATORY** | Direct product URL where the user can complete the purchase. Render as a markdown link: `[Buy](https://…)`. **No row without a working link.** |
+| Notes |   | `USD→ILS @ rate`, `parallel import`, `shrunk from Xkg`, `bundle ×2`, … |
+
+A ranking without buyable links defeats the whole purpose of this skill — the user has to be one click away from buying the cheapest option.
 
 ### Step 7 — Separate sections for non-comparables
 
@@ -206,6 +210,20 @@ Worked example: Super Effect Dual Pack lists ₪9.90/100g, but tubs went from 2.
 - **Pre-workout serving size**: ₪/100g is the wrong unit — switch to ₪/serving when the category is pre-workout (typical serving 8–15 g). Detect category and adjust the unit; mention the switch in the first user-facing line.
 - **Don't trust a single search.** First-pass coverage is typically ~35%. The master category scrape (Teva Bari) plus Zap aggregator (cross-retailer) is the authoritative pair.
 
+## Link-capture rules
+
+Links are the most important field in the output. The user reads this skill's result to decide what to buy, then clicks through to buy it. A row without a working link is dead weight.
+
+- **Every ranked row MUST include a direct product URL.** No exceptions. If you have a price but no URL, drop the row from the ranking and note the skip in the coverage section.
+- **URL must be the retailer's own product page**, not a search-results page, category page, or aggregator landing page. The user should land on the product they're buying, not a list to wade through.
+- **Render as markdown:** `[Buy](https://exact-url)`. Not bare URLs, not "see retailer". This matters for tables.
+- **Teva Bari URLs** come from the URL-extraction variant of the scrape (the `perl -0777` block in § Teva Bari scrape recipe — captures the first `href="/..."` inside each product block). Always run that variant, not the quick-view variant.
+- **iHerb URLs** are stable `https://il.iherb.com/pr/...` slugs — capture from the category-page result cards.
+- **Zap rows** must link to the **vendor's** product page (the "לרכישה" / "לאתר המוכר" click-through), not to the Zap model page. The Zap model page can go in the Notes column as a secondary "compare-vendors" link.
+- **Discovery (Lane C) rows** must link to the discovered store's actual product page. If the only thing you can extract is a search-results URL, don't include the row.
+- **Never invent or guess a URL.** If you're uncertain a URL is correct, don't include the row.
+- **Verify before output (validation step):** before rendering the final table, scan the ranking and confirm every row has a non-empty link cell. If any row is missing one, either backfill it (re-fetch the product page) or drop the row.
+
 ## Rules
 
 - Never invent a product, price, or retailer URL. If a fetch fails, omit and note in the coverage section.
@@ -214,6 +232,16 @@ Worked example: Super Effect Dual Pack lists ₪9.90/100g, but tubs went from 2.
 - Always show the resolved Hebrew query in the first user-facing line so the user can correct it.
 - Cap per-retailer fetches to keep the run bounded (5 product-page fetches per retailer is a reasonable ceiling).
 - Don't run more than 3–4 Google IL variants per session (rate limits, per `general-search` rules).
+
+## Validation checklist (before declaring success)
+
+1. Every row in the main ranked table has a working markdown link in the Link column. No bare text, no "see retailer", no empty cells.
+2. Resolved Hebrew query was stated in the first user-facing line.
+3. All prices are in ILS, VAT-inclusive (iHerb USD rows explicitly flagged).
+4. ₪/100g was recomputed from current size, not copied from the retailer's displayed value.
+5. Bundles section (for protein) checks each known Teva Bari bundle URL.
+6. Specialty subgroup (isolate / vegan / casein) is listed separately from concentrate-on-mass ranking.
+7. Coverage disclosure at the end lists lanes scanned, product counts, and any skipped stores.
 
 ## Examples of valid invocations
 
