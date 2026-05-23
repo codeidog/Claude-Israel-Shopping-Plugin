@@ -55,7 +55,7 @@ Take up to 5 hits and try the same Hebrew category query at each store's `websit
 
 - **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; use the URL-extraction variant of the scrape (the second `perl -0777` block) so each row carries its `data-url`. For bundle URLs, use the canonical bundle table.
 - **Lane A — iHerb IL:** WebFetch the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.); for each top product capture name, brand, size, price in ILS, **and the product-page URL** (typically `il.iherb.com/pr/...`). If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
-- **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. From the Zap model page, capture for each top vendor: vendor name, price, **and the click-through URL to the vendor's own product page** (the link Zap labels "לרכישה" / "לאתר המוכר"). The Zap model page itself is also useful — include it as a secondary "see-all-vendors" link in the row notes, but the ranking link must be the direct vendor URL so the user can complete the purchase in one click.
+- **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. From the Zap model page, capture for each top vendor: vendor name, price, **and the click-through URL to the vendor's own product page** (the link Zap labels "לרכישה" / "לאתר המוכר"). The Zap model page itself is also useful — include it as a secondary "see-all-vendors" link in the row notes, but the ranking link must be the direct vendor URL so the user can complete the purchase in one click. **Every Zap-sourced row must then pass the validation pass in § Zap row validation below before it appears in the ranking.**
 - **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits via Tavily or homepage form. Cap 2 products per discovered store. **Every row must include the direct product URL**; skip silently if a hit doesn't yield one.
 
 ### Step 3 — Normalize sizes
@@ -118,7 +118,7 @@ End with:
 1. Single sentence: cheapest powder overall + cheapest bundle.
 2. Free-shipping thresholds where known (Teva Bari ₪350; others vary — say "unknown" rather than invent).
 3. **Coverage disclosure**, verbatim style:
-   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N vendors), discovery (M stores, K parseable). Bundles checked: <list>. Stores skipped / errored: <list>. For 100% confidence on a single retailer, browse its category page directly.
+   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N candidates → V validated, D dropped), discovery (M stores, K parseable). Zap validation: ✓ V ranked, ⚠ P price-drifted (live used), ✗ D dropped (OOS=A, 404=B, blocked=C, timeout=E). Bundles checked: <list>. Stores skipped / errored: <list>. For 100% confidence on a single retailer, browse its category page directly.
 
 ## Teva Bari scrape recipe (inline)
 
@@ -224,6 +224,52 @@ Links are the most important field in the output. The user reads this skill's re
 - **Never invent or guess a URL.** If you're uncertain a URL is correct, don't include the row.
 - **Verify before output (validation step):** before rendering the final table, scan the ranking and confirm every row has a non-empty link cell. If any row is missing one, either backfill it (re-fetch the product page) or drop the row.
 
+## Zap row validation
+
+Zap is an aggregator — it caches vendor data and the snapshot drifts. By the time the user sees a Zap row, the underlying vendor page may have a different price, be out of stock, or have moved/removed the product. Showing a stale Zap row leads the user to click through, see a different reality, and lose trust in the ranking.
+
+**Every Zap-sourced row must be validated against the vendor's own product page before it appears in the ranking.** No validation, no row.
+
+### Validation pass
+
+For each candidate row produced by `/search-zap`:
+
+1. **Fetch the vendor's product page** at the click-through URL captured from Zap (WebFetch or curl, depending on the vendor — Playwright fallback only if both fail).
+2. **Extract the live price** from the vendor's own page (their price element / structured-data block / og-meta — not Zap's).
+3. **Extract live stock state** — out-of-stock markers vary by retailer (Hebrew `אזל מהמלאי` / `חסר במלאי` / `חסר בארץ`; English `out of stock`, `sold out`; product page that returns to a category page is also a signal).
+4. **Compare against Zap's snapshot:**
+
+   | Outcome | Action |
+   |---|---|
+   | Page loads, price within **±3%** of Zap's, in stock | ✅ Include row. Use the **vendor's live price** in the table (not Zap's). |
+   | Page loads, price differs > 3% | ⚠️ Include row with the **vendor's live price**, and add a `Zap snapshot: ₪X → live ₪Y` note in the Notes column. Re-rank if the new price changes the position. |
+   | Page loads but OOS | ❌ **Drop the row** from the main ranking. Optionally surface in the "Out of stock" section. |
+   | Page 404 / redirects to category / product moved | ❌ **Drop the row**. Note the broken Zap link in the coverage section. |
+   | Page hidden behind login / captcha / blocked | ❌ **Drop the row**. Note in coverage. Don't loop on captchas. |
+   | Fetch times out or errors | ❌ **Drop the row**. Note in coverage. |
+
+5. **Never display a Zap row without going through this pass.** If validation can't be performed for any reason, the row doesn't make it into the output.
+
+### Why this matters
+
+- Zap's price is what Zap had last time it crawled the vendor — could be hours, could be days old.
+- Out-of-stock items linger on Zap until the next crawl — the ranking would steer the user to a dead product.
+- Vendor URLs go stale when retailers rename slugs or restructure their catalog.
+- The whole point of this skill is "one click to buy" — a broken or stale Zap link breaks that promise.
+
+### What to write in the coverage section
+
+After the ranking, in the coverage disclosure, report Zap validation outcomes explicitly:
+
+```
+Zap candidates: N
+  ✓ Validated and ranked: X
+  ⚠ Price-drifted (live price used): Y — <list vendor names>
+  ✗ Dropped: Z — <reasons: OOS=A, 404=B, blocked=C, timeout=D>
+```
+
+This gives the user transparency about why some Zap-listed vendors didn't make the table.
+
 ## Rules
 
 - Never invent a product, price, or retailer URL. If a fetch fails, omit and note in the coverage section.
@@ -236,12 +282,13 @@ Links are the most important field in the output. The user reads this skill's re
 ## Validation checklist (before declaring success)
 
 1. Every row in the main ranked table has a working markdown link in the Link column. No bare text, no "see retailer", no empty cells.
-2. Resolved Hebrew query was stated in the first user-facing line.
-3. All prices are in ILS, VAT-inclusive (iHerb USD rows explicitly flagged).
-4. ₪/100g was recomputed from current size, not copied from the retailer's displayed value.
-5. Bundles section (for protein) checks each known Teva Bari bundle URL.
-6. Specialty subgroup (isolate / vegan / casein) is listed separately from concentrate-on-mass ranking.
-7. Coverage disclosure at the end lists lanes scanned, product counts, and any skipped stores.
+2. **Every Zap-sourced row went through the § Zap row validation pass — vendor page fetched, price/stock verified, live price used. No unvalidated Zap rows in the output.**
+3. Resolved Hebrew query was stated in the first user-facing line.
+4. All prices are in ILS, VAT-inclusive (iHerb USD rows explicitly flagged).
+5. ₪/100g was recomputed from current size, not copied from the retailer's displayed value.
+6. Bundles section (for protein) checks each known Teva Bari bundle URL.
+7. Specialty subgroup (isolate / vegan / casein) is listed separately from concentrate-on-mass ranking.
+8. Coverage disclosure at the end lists lanes scanned, product counts, any skipped stores, **and Zap validation outcomes (validated / price-drifted / dropped with reasons)**.
 
 ## Examples of valid invocations
 
