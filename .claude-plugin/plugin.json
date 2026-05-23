@@ -1,7 +1,7 @@
 {
   "name": "israel-shopping",
   "version": "1.4.0",
-  "description": "Israeli shopping workflows — tech retailers (Ivory, KSP, Bug, TMS), Zap price comparison, Hebrew term resolution, ILS conversion, RRP checks, PN cross-reference, brand identification, and AliExpress IL-context tooling: search (ILS/Hebrew, IL reviews, free-shipping, combo exclusion, local-vs-import compare), per-listing landed-cost fetcher with live FX + Israeli VAT bands (no-auth scraper), and authenticated Affiliate API path (stub).",
+  "description": "Israeli shopping workflows — tech retailers (Ivory, KSP, Bug, TMS), Zap price comparison, Hebrew term resolution, ILS conversion, RRP checks, PN cross-reference, brand identification, AliExpress IL-context tooling (search with ILS/Hebrew, IL reviews, free-shipping, combo exclusion, local-vs-import compare; per-listing landed-cost fetcher with live FX + Israeli VAT bands; authenticated Affiliate API fallback), and a cross-retailer supplement deal finder ranking by ₪/100g across Teva Bari, iHerb-IL, Zap, and discovered specialists.",
   "author": {
     "name": "Daniel Rosehill",
     "url": "https://github.com/danielrosehill"
