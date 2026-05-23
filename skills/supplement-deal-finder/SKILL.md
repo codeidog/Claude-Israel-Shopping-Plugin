@@ -5,14 +5,14 @@ description: Find the best price-per-100g deal on supplements (protein powder, c
 
 # Supplement Deal Finder (cross-retailer ₪/100g, Israel)
 
-Cross-retailer counterpart to `protein-powder-deal-finder` (which is single-retailer, Teva Bari only). Fans out across the IL supplement-retailer landscape, normalizes prices to ₪/100g, and returns a unified ranking. Default category is whey protein powder, but works for any supplement sold by mass (creatine, gainer, pre-workout, BCAA, casein, vegan blends).
+Cross-retailer skill for finding the best supplement deals across Israeli online shops. Normalizes prices to ₪/100g and returns a unified ranking. Default category is whey protein powder, but works for any supplement sold by mass (creatine, gainer, pre-workout, BCAA, casein, vegan blends).
+
+This skill is **self-contained** — everything needed to scrape each retailer is documented below. No dependency on any other skill.
 
 ## When to use
 
-- User wants the best supplement deal *across* Israeli retailers, not at a specific shop.
+- User wants the best supplement deal *across* Israeli retailers.
 - User explicitly invokes a phrase like "best ₪/100g protein in israel", "cheapest creatine in israel", "compare protein prices across israeli sites".
-
-For single-retailer Teva Bari sweeps, defer to `protein-powder-deal-finder` instead — it has the canonical scrape path and bundle list.
 
 ## Fan-out targets
 
@@ -20,10 +20,10 @@ Three lanes, run in parallel where possible:
 
 ### Lane A — Curated specialist retailers (confirmed)
 
-| Retailer | Domain | Notes |
-|---|---|---|
-| Teva Bari | `tevabari.co.il` | Joomla/VirtueMart, scrape via the `protein-powder-deal-finder` skill. Free shipping at ₪350. |
-| iHerb (IL channel) | `il.iherb.com` | International stock, ships to IL. Prices shown in ILS when geo-detected. Watch the $40 USD IL import threshold — VAT bills above kick in. |
+| Retailer | Domain | Method | Free-shipping threshold |
+|---|---|---|---|
+| Teva Bari | `tevabari.co.il` | curl + parse (Joomla/VirtueMart, data-* attributes, no JS needed) — see § Teva Bari scrape recipe below | ₪350 |
+| iHerb (IL channel) | `il.iherb.com` | WebFetch the IL category URL; prices usually shown in ILS when geo-detected, occasionally USD — convert and flag | varies, check cart |
 
 Always include both unless the user excludes one.
 
@@ -33,7 +33,7 @@ Delegate to `/search-zap` with the supplement query in Hebrew. Zap surfaces tier
 
 ### Lane C — Name-regex discovery over the merged store list
 
-Load the merged stores list (`stores.json` overlaid with `<plugin-data-dir>/user-stores.json` — see `docs/search-strategies.md` § store-metadata merge). Until the upstream `categorisation.categories[]` field is populated, filter by **name regex** instead:
+Load the merged stores list (`stores.json` overlaid with `<plugin-data-dir>/user-stores.json` — see `docs/search-strategies.md` § store-metadata merge). Until the upstream `categorisation.categories[]` field is populated, filter by **name regex**:
 
 ```
 sport | fitness | nutri | teva | gnc | gainer | protein | health
@@ -51,7 +51,7 @@ Take up to 5 hits and try the same Hebrew category query at each store's `websit
 
 ### Step 2 — Fire all three lanes in parallel
 
-- **Lane A — Teva Bari:** invoke the `protein-powder-deal-finder` skill workflow (or its core scrape). Get its ranked list with ₪/100g already computed.
+- **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; produces the ranked list with ₪/100g already computed.
 - **Lane A — iHerb IL:** WebFetch the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.); for each top product capture name, brand, size, price in ILS. If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
 - **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. Pull the model-page price range and the cheapest 3 vendors.
 - **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits via Tavily or homepage form. Cap 2 products per discovered store. Skip silently if nothing parseable.
@@ -73,13 +73,13 @@ For products without size in the title, fetch the product page (cap 5 fetches pe
 ₪/100g = price / (size_in_grams / 100)
 ```
 
-**Always recompute yourself.** Per the Teva Bari skill, several IL supplement sites silently shrink tub sizes (2.27 kg → 2 kg is common) without updating their displayed ₪/100g. Read the *current* title weight, not the legacy ratio.
+**Always recompute yourself.** Several IL supplement sites silently shrink tub sizes (2.27 kg → 2 kg is common) without updating their displayed ₪/100g. Read the *current* title weight, not the legacy ratio. See § Stale-weight gotcha below for the recurring pattern.
 
 For bundles, multiply: e.g. dual pack of 2 kg tubs = 4,000 g total.
 
 ### Step 5 — Bundles (off-category)
 
-Bundles are the single biggest omission risk. They almost never appear on the master category page — they sit on standalone product URLs. For Teva Bari the `protein-powder-deal-finder` skill already enumerates known bundles. For other retailers, run an extra Hebrew search:
+Bundles are the single biggest omission risk. They almost never appear on the master category page — they sit on standalone product URLs. For Teva Bari, see the known-bundles table in § Teva Bari scrape recipe. For other retailers, run an extra Hebrew search:
 
 ```
 site:<retailer-domain> <category-hebrew> מארז זוגי
@@ -114,15 +114,97 @@ End with:
 1. Single sentence: cheapest powder overall + cheapest bundle.
 2. Free-shipping thresholds where known (Teva Bari ₪350; others vary — say "unknown" rather than invent).
 3. **Coverage disclosure**, verbatim style:
-   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N vendors), discovery (M stores, K parseable). Bundles checked: <list>. Stores skipped / errored: <list>. For 100% confidence on a single retailer, run `/protein-powder-deal-finder` (Teva Bari) or browse the retailer's category page directly.
+   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N vendors), discovery (M stores, K parseable). Bundles checked: <list>. Stores skipped / errored: <list>. For 100% confidence on a single retailer, browse its category page directly.
+
+## Teva Bari scrape recipe (inline)
+
+`tevabari.co.il` is a Joomla + VirtueMart site. Product data is **embedded in HTML as `data-*` attributes** on `<div class="product">` elements — no JS rendering needed, no Playwright required. Each product div has: `data-id`, `data-name`, `data-price`, `data-brand`, `data-available`, `data-category`. The master category page shows **only in-stock products** (out-of-stock items are filtered out entirely; `data-available="1"` is reliable for in-stock state).
+
+### Category URLs
+
+Default — protein powder (URL-encoded Hebrew, decoded path `כושר-ופיתוח-גוף/אבקות-חלבון/כל-אבקות-החלבון`):
+
+```
+https://www.tevabari.co.il/%D7%9B%D7%95%D7%A9%D7%A8-%D7%95%D7%A4%D7%99%D7%AA%D7%95%D7%97-%D7%92%D7%95%D7%A3/%D7%90%D7%91%D7%A7%D7%95%D7%AA-%D7%97%D7%9C%D7%91%D7%95%D7%9F/%D7%9B%D7%9C-%D7%90%D7%91%D7%A7%D7%95%D7%AA-%D7%94%D7%97%D7%9C%D7%91%D7%95%D7%9F
+```
+
+For other categories (creatine, gainer, pre-workout), discover the master "all-X" URL with:
+
+```
+WebSearch site:tevabari.co.il <category> כל ה<category>
+```
+
+…or browse the manufacturer/category nav.
+
+### Scrape the canonical product list
+
+Via Bash:
+
+```bash
+curl -sL "<MASTER_URL>" \
+  -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" \
+  -o /tmp/teva_category.html
+
+# Quick view — name, price, availability, brand, id
+grep -oE 'div class="product"[^>]*data-name="[^"]+"[^>]*' /tmp/teva_category.html | \
+  perl -ne 'if (/data-id="([^"]+)".*?data-name="([^"]+)".*?data-price="([^"]+)".*?data-brand="([^"]+)".*?data-available="([^"]+)"/) {
+    my ($id,$n,$p,$b,$a)=($1,$2,$3,$4,$5);
+    $n =~ s/&amp;/&/g; $n =~ s/&quot;/"/g; $n =~ s/&#039;/'\''/g; $n =~ s/&amp;ndash;/-/g;
+    print "ID=$id\tPRICE=$p\tAVAIL=$a\tBRAND=$b\tNAME=$n\n";
+  }'
+```
+
+To also extract product URLs:
+
+```bash
+perl -0777 -ne 'while (/<div class="product"[^>]*data-id="(\d+)"[^>]*data-name="([^"]+)"[^>]*data-price="([^"]+)"[^>]*data-available="([^"]+)"[^>]*>(.*?)<\/div>\s*<\/div>\s*<\/div>/gs) {
+  my ($id,$n,$p,$a,$blk)=($1,$2,$3,$4,$5);
+  my $url = ""; if ($blk =~ /href="(\/[^"#?]+)"/) { $url = $1; }
+  $n =~ s/&amp;/&/g; $n =~ s/&quot;/"/g; $n =~ s/&#039;/'\''/g; $n =~ s/&amp;ndash;/-/g;
+  print "PRICE=$p\tAVAIL=$a\tURL=$url\tNAME=$n\n";
+}' /tmp/teva_category.html
+```
+
+### Known protein-powder bundles (off-category — must check separately)
+
+Bundles sit on standalone product URLs and are **not** on the master category page. For the default protein-powder run, also WebFetch each of these to capture current price + weight + stock:
+
+| Bundle | URL |
+|---|---|
+| Super Effect Whey Dual Pack | https://www.tevabari.co.il/%D7%A1%D7%95%D7%A4%D7%A8-%D7%90%D7%A4%D7%A7%D7%98-%D7%90%D7%91%D7%A7%D7%AA-%D7%97%D7%9C%D7%91%D7%95%D7%9F-%D7%9E%D7%90%D7%A8%D7%96-%D7%96%D7%95%D7%92%D7%99-super-effect |
+| Allin Whey 2-pack | https://www.tevabari.co.il/allin-whey-protein-mix-powder-2pack |
+| ALFA Whey Dual Pack | https://www.tevabari.co.il/%D7%90%D7%9C%D7%A4%D7%90-%D7%97%D7%9C%D7%91-%D7%99%D7%A9%D7%A8%D7%90%D7%9C-%D7%9E%D7%90%D7%A8%D7%96-%D7%96%D7%95%D7%92%D7%99 |
+| Combat 100% Whey Dual Pack | https://www.tevabari.co.il/muscle-pharm-combat-whey-bouble |
+
+For categories other than protein, search for bundles with:
+
+```
+WebSearch site:tevabari.co.il <category-hebrew> מארז זוגי
+```
+
+### Size handling for Teva Bari
+
+Many product names include size in the title (e.g. `759 גרם`, `2 ק״ג`). For products without size in the name, WebFetch the individual product page to extract size + verify stock. Out-of-stock individual pages show `חסר בארץ`.
+
+### Stale-weight gotcha
+
+Several products on Teva Bari (Super Effect Dual Pack, Allin, GO Whey, others) had their tub size silently reduced (commonly 2.3 kg → 2 kg per tub, or 2.27 kg → 2 kg) but the page's own stated ₪/100g was NOT recalculated. Always:
+
+1. Read the product **title** for the current weight (e.g. `מארז זוגי X ק"ג`).
+2. Look for an `הודעה חשובה: ... הוקטנה ... כעת במשקל X ק"ג במקום Y ק"ג` notice on the product page.
+3. Look for spec lines that show **two weights** (e.g. `4.54 ק"ג - 4 ק"ג`) — that's the old/new conflict.
+4. **Recompute ₪/100g yourself using the new weight.** Do NOT trust the site's `X ₪ ל-100 גרם` text — it's often based on the old weight and can be ~14% off.
+
+Worked example: Super Effect Dual Pack lists ₪9.90/100g, but tubs went from 2.27 kg → 2 kg. Real total is 4,000 g, not 4,540 g. Actual ₪/100g = 449.90 ÷ 4,000 × 100 = **₪11.25**, not ₪9.90.
 
 ## Israeli supplement-market gotchas
 
-- **Shrinkflation without ₪/100g update**: see Teva Bari skill — recompute, don't trust the site's number.
-- **Parallel import (יבוא מקביל)**: common for US brands (Optimum Nutrition, Dymatize, MusclePharm). Often the cheapest row. Warranty / quality-assurance is shorter — note it.
-- **iHerb VAT threshold**: IL import VAT kicks in at $75 USD landed (post-2024 rule). iHerb shows a VAT-inclusive total only at checkout. For comparisons, add 18% to the iHerb sticker if the cart will exceed $75 USD — flag this in the row.
+- **Shrinkflation without ₪/100g update**: documented above for Teva Bari; similar pattern appears at other supplement retailers — recompute, don't trust the site's number.
+- **Parallel import (יבוא מקביל)**: common for US brands (Optimum Nutrition, Dymatize, MusclePharm). Often the cheapest row. Warranty / quality-assurance is shorter — note it in the row.
+- **iHerb VAT threshold**: IL import VAT kicks in at $75 USD landed (post-2024 rule, currently 18%). iHerb shows a VAT-inclusive total only at checkout. For comparisons, add 18% to the iHerb sticker if the cart will exceed $75 USD — flag this in the row notes.
 - **Whey concentrate vs. isolate vs. blend**: concentrate is ~70–80% protein, isolate ~90%, blends vary. A ₪/100g winner that's actually a blend (with maltodextrin / creamer) is a worse ₪/100g-protein deal. Always show `Type` in the table.
-- **Pre-workout serving size**: ₪/100g is the wrong unit — switch to ₪/serving when the category is pre-workout (typical serving 8–15 g). Detect category and adjust the unit; mention the switch in the first line.
+- **Pre-workout serving size**: ₪/100g is the wrong unit — switch to ₪/serving when the category is pre-workout (typical serving 8–15 g). Detect category and adjust the unit; mention the switch in the first user-facing line.
+- **Don't trust a single search.** First-pass coverage is typically ~35%. The master category scrape (Teva Bari) plus Zap aggregator (cross-retailer) is the authoritative pair.
 
 ## Rules
 
@@ -143,6 +225,5 @@ End with:
 
 ## Out of scope
 
-- Single-retailer Teva-Bari-only sweeps → use `protein-powder-deal-finder`.
 - Macro / amino-acid profile comparison — only price-per-mass.
 - Ordering / cart automation.
