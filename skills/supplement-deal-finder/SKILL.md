@@ -53,10 +53,12 @@ Take up to 5 hits and try the same Hebrew category query at each store's `websit
 
 **For every product captured, the direct product URL is mandatory** (see § Link-capture rules below). If a fetch returns a price but no resolvable URL, drop the row — a row without a link is useless to the user.
 
-- **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; use the URL-extraction variant of the scrape (the second `perl -0777` block) so each row carries its `data-url`. For bundle URLs, use the canonical bundle table.
-- **Lane A — iHerb IL:** WebFetch the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.); for each top product capture name, brand, size, price in ILS, **and the product-page URL** (typically `il.iherb.com/pr/...`). If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
-- **Lane B — Zap:** delegate to `/search-zap` with the Hebrew term. From the Zap model page, capture for each top vendor: vendor name, price, **and the click-through URL to the vendor's own product page** (the link Zap labels "לרכישה" / "לאתר המוכר"). The Zap model page itself is also useful — include it as a secondary "see-all-vendors" link in the row notes, but the ranking link must be the direct vendor URL so the user can complete the purchase in one click. **Every Zap-sourced row must then pass the validation pass in § Zap row validation below before it appears in the ranking.**
-- **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits via Tavily or homepage form. Cap 2 products per discovered store. **Every row must include the direct product URL**; skip silently if a hit doesn't yield one.
+**Bot protection is the default, not an edge case.** Most Israeli retailers and Zap deploy WAFs (Cloudflare, PerimeterX, Akamai). WebFetch and curl regularly return 403, Hebrew-encoding mangling, or fingerprint-checking interstitials. When that happens, **escalate to Playwright — do not give up**. See § Backend chain and bot-protection handling below for the exact escalation procedure.
+
+- **Lane A — Teva Bari:** follow the inline scrape recipe in § Teva Bari scrape recipe below; use the URL-extraction variant of the scrape (the second `perl -0777` block) so each row carries its `data-url`. Teva Bari is friendly to curl with a normal UA — no bot protection observed. For bundle URLs, use the canonical bundle table.
+- **Lane A — iHerb IL:** Try WebFetch first on the IL channel category URL (`il.iherb.com/c/whey-protein` for protein, etc.). **If you get 403, a captcha page, or empty/garbled HTML, escalate to Playwright** (`mcp__plugin_playwright_playwright__browser_navigate` → `browser_snapshot` → extract product cards). For each top product capture name, brand, size, price in ILS, **and the product-page URL** (typically `il.iherb.com/pr/...`). If price is shown in USD, convert via `/convert-currency` at current rate and **flag the row** as USD-derived (FX adds uncertainty).
+- **Lane B — Zap:** **Playwright is the default backend for Zap, not the fallback** (per `docs/search-strategies.md` § Zap — bot detection is active; Tavily snapshots are stale; WebFetch returns mangled / blocked content). Don't waste a round-trip on WebFetch — go straight to Playwright. Navigate to `https://www.zap.co.il/search.aspx?keyword=<encoded Hebrew query>`, find the matching model, open the model page (`zap.co.il/model.aspx?modelid=...`), and extract the vendor table. From each top vendor capture: vendor name, price, **and the click-through URL to the vendor's own product page** (the link Zap labels "לרכישה" / "לאתר המוכר"). The Zap model page itself is also useful — include it as a secondary "see-all-vendors" link in the row notes, but the ranking link must be the direct vendor URL so the user can complete the purchase in one click. **Every Zap-sourced row must then pass the validation pass in § Zap row validation below before it appears in the ranking** (which itself uses the same backend escalation for the vendor-page fetch).
+- **Lane C — Discovery:** name-regex filter the merged store list (see above), try Hebrew-term search at up to 5 hits. Per-store backend chain: **Tavily → WebFetch → Playwright homepage form** (per `docs/search-strategies.md` § Backend chain). Cap 2 products per discovered store. **Every row must include the direct product URL**; skip silently if a hit doesn't yield one even after Playwright escalation.
 
 ### Step 3 — Normalize sizes
 
@@ -118,7 +120,10 @@ End with:
 1. Single sentence: cheapest powder overall + cheapest bundle.
 2. Free-shipping thresholds where known (Teva Bari ₪350; others vary — say "unknown" rather than invent).
 3. **Coverage disclosure**, verbatim style:
-   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N candidates → V validated, D dropped), discovery (M stores, K parseable). Zap validation: ✓ V ranked, ⚠ P price-drifted (live used), ✗ D dropped (OOS=A, 404=B, blocked=C, timeout=E). Bundles checked: <list>. Stores skipped / errored: <list>. For 100% confidence on a single retailer, browse its category page directly.
+   > Lanes scanned: Teva Bari (N products), iHerb IL (N), Zap (N candidates → V validated, D dropped), discovery (M stores, K parseable).
+   > Backends used: Teva Bari=<curl|Playwright>, iHerb=<WebFetch|Playwright + reason>, Zap=<Playwright>, discovery=<mixed>.
+   > Zap validation: ✓ V ranked, ⚠ P price-drifted (live used), ✗ D dropped (OOS=A, 404=B, blocked=C, timeout=E).
+   > Bundles checked: <list>. Stores skipped / errored only after Playwright escalation: <list>. For 100% confidence on a single retailer, browse its category page directly.
 
 ## Teva Bari scrape recipe (inline)
 
@@ -224,6 +229,59 @@ Links are the most important field in the output. The user reads this skill's re
 - **Never invent or guess a URL.** If you're uncertain a URL is correct, don't include the row.
 - **Verify before output (validation step):** before rendering the final table, scan the ranking and confirm every row has a non-empty link cell. If any row is missing one, either backfill it (re-fetch the product page) or drop the row.
 
+## Backend chain and bot-protection handling
+
+The plugin's canonical fetch chain (per `docs/search-strategies.md` § Backend chain) is **Tavily → WebFetch → Playwright**. This skill follows it strictly. The most common reason a lane "returns zero" is not that the product doesn't exist — it's that bot protection blocked WebFetch and the skill failed to escalate. Don't stop at step 2.
+
+### When to escalate
+
+Treat **any** of these as a "WebFetch failed → escalate to Playwright" signal:
+
+- HTTP 403, 429, 503
+- Page body contains `Just a moment`, `Checking your browser`, `cf-chl-`, `Access denied`, `enable JavaScript`, or any obvious WAF interstitial
+- Hebrew text comes back as `?????`, `Ã—`, mojibake, or empty
+- Response is a homepage / login wall / cookie-consent page instead of the requested URL
+- Fetched HTML is suspiciously small (<2 KB for a category page) or has no product elements
+- Multiple WebFetches to the same domain in this session have already failed — go straight to Playwright
+
+### Escalation procedure (Playwright)
+
+Use the Playwright MCP tools (`mcp__plugin_playwright_playwright__browser_*`). The general pattern is the same regardless of retailer:
+
+```
+1. browser_navigate          → target URL (category page, search-results page, or product page)
+2. browser_snapshot           → get the accessibility tree; locate product cards or price element
+3. (if a search step is needed)
+   browser_type               → into the search box, submit: true
+   browser_snapshot           → again, post-results
+4. Extract: title, price (ILS, VAT-inclusive), product URL, stock, size if visible
+5. browser_close              → free the browser when the lane is done with this domain
+```
+
+For Zap specifically:
+- Start at `https://www.zap.co.il/search.aspx?keyword=<URL-encoded Hebrew>` — don't keyword-search via WebFetch, you'll get mangled encoding.
+- The first useful snapshot is the search-results list. Pick the right model card and click through to `model.aspx?modelid=<id>`.
+- The vendor table on the model page is what you extract from. Each vendor row has a "לרכישה" / "לאתר המוכר" link — that's the click-through URL the ranking needs.
+
+For iHerb IL specifically:
+- Navigate `https://il.iherb.com/c/<category-slug>` (e.g. `/c/whey-protein`, `/c/creatine`).
+- iHerb's product cards are well-structured; the snapshot will list each card with title, price, and a `/pr/...` href. Extract straight from the snapshot.
+- If the page asks for a country/language confirmation, dismiss it (`browser_click` on the IL/he-IL option) before extracting.
+
+### Cap and reuse
+
+- Playwright is expensive; cap one browser session per retailer per run. Reuse it for multi-product extraction within the same domain.
+- If Playwright **also** fails (timeout, captcha you can't solve, structural change), then and only then record "blocked" in the coverage section.
+- Never silently skip a lane because WebFetch returned 403. The coverage section must distinguish "no products found after Playwright" from "WebFetch 403, skill failed to escalate" — the former is a real coverage gap; the latter is a bug in this skill's execution.
+
+### What to write in the coverage section
+
+For each lane, name the backend that produced the data:
+
+```
+Backends used: Teva Bari=curl, iHerb=Playwright (WebFetch 403), Zap=Playwright (default), discovery=mixed
+```
+
 ## Zap row validation
 
 Zap is an aggregator — it caches vendor data and the snapshot drifts. By the time the user sees a Zap row, the underlying vendor page may have a different price, be out of stock, or have moved/removed the product. Showing a stale Zap row leads the user to click through, see a different reality, and lose trust in the ranking.
@@ -234,7 +292,7 @@ Zap is an aggregator — it caches vendor data and the snapshot drifts. By the t
 
 For each candidate row produced by `/search-zap`:
 
-1. **Fetch the vendor's product page** at the click-through URL captured from Zap (WebFetch or curl, depending on the vendor — Playwright fallback only if both fail).
+1. **Fetch the vendor's product page** at the click-through URL captured from Zap. Use the standard backend chain (WebFetch first, escalate to Playwright on any of the signals in § Backend chain — don't drop the row just because WebFetch hit a 403; escalate first).
 2. **Extract the live price** from the vendor's own page (their price element / structured-data block / og-meta — not Zap's).
 3. **Extract live stock state** — out-of-stock markers vary by retailer (Hebrew `אזל מהמלאי` / `חסר במלאי` / `חסר בארץ`; English `out of stock`, `sold out`; product page that returns to a category page is also a signal).
 4. **Compare against Zap's snapshot:**
@@ -282,13 +340,14 @@ This gives the user transparency about why some Zap-listed vendors didn't make t
 ## Validation checklist (before declaring success)
 
 1. Every row in the main ranked table has a working markdown link in the Link column. No bare text, no "see retailer", no empty cells.
-2. **Every Zap-sourced row went through the § Zap row validation pass — vendor page fetched, price/stock verified, live price used. No unvalidated Zap rows in the output.**
-3. Resolved Hebrew query was stated in the first user-facing line.
-4. All prices are in ILS, VAT-inclusive (iHerb USD rows explicitly flagged).
-5. ₪/100g was recomputed from current size, not copied from the retailer's displayed value.
-6. Bundles section (for protein) checks each known Teva Bari bundle URL.
-7. Specialty subgroup (isolate / vegan / casein) is listed separately from concentrate-on-mass ranking.
-8. Coverage disclosure at the end lists lanes scanned, product counts, any skipped stores, **and Zap validation outcomes (validated / price-drifted / dropped with reasons)**.
+2. **Every Zap-sourced row went through the § Zap row validation pass — vendor page fetched (with Playwright escalation if WebFetch was blocked), price/stock verified, live price used. No unvalidated Zap rows in the output.**
+3. **For every lane that reported zero results or "blocked", Playwright was attempted before giving up** (per § Backend chain). If a 403 / captcha / mangled-encoding response from WebFetch was the only thing that stopped a lane, that's a skill-execution bug, not a coverage limitation — go back and escalate.
+4. Resolved Hebrew query was stated in the first user-facing line.
+5. All prices are in ILS, VAT-inclusive (iHerb USD rows explicitly flagged).
+6. ₪/100g was recomputed from current size, not copied from the retailer's displayed value.
+7. Bundles section (for protein) checks each known Teva Bari bundle URL.
+8. Specialty subgroup (isolate / vegan / casein) is listed separately from concentrate-on-mass ranking.
+9. Coverage disclosure at the end lists lanes scanned, product counts, **the backend used per lane**, any stores skipped **only after Playwright also failed**, and Zap validation outcomes (validated / price-drifted / dropped with reasons).
 
 ## Examples of valid invocations
 
