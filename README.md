@@ -21,6 +21,13 @@ Israeli shopping workflows for Claude Code — tech retailers, Zap price compari
 
 Strategy and know-how (Hebrew terms, URL patterns, Playwright fallback, sourcing waterfall, store-merge convention) live in [`docs/search-strategies.md`](docs/search-strategies.md). The commands reference it rather than restating.
 
+## Skills (auto-invoked)
+
+Skills under [`skills/`](skills/) trigger from natural-language phrases without an explicit slash command:
+
+- `search-aliexpress`, `free-shipping-only`, `exclude-combo-deals`, `il-reviews-show`, `fetch-listing`, `fetch-listing-api`, `compare-to-local` — AliExpress IL-context tooling (search with IL filters, scrape listing with landed cost + 18% VAT, filter reviews to Israeli buyers, compare to local).
+- `supplement-deal-finder` — cross-retailer ₪/100g ranker for supplements (whey, creatine, gainer, pre-workout, etc.) across Teva Bari, iHerb-IL, Zap, and discovered specialists. Handles bundles, shrinkflation, parallel-import notes, and switches to ₪/serving for pre-workout.
+
 ## Data
 
 Store metadata is read live from [`danielrosehill/Israel-Online-Stores`](https://github.com/danielrosehill/Israel-Online-Stores) (`stores.json`) — 800+ Israeli retailers with tier, delivery, Eilat-door, and Zap-profile metadata. User-added stores overlay this list from `<plugin-data-dir>/user-stores.json` (`$CLAUDE_USER_DATA/israel-shopping/user-stores.json`, or the XDG/`~/.local/share/claude-plugins/israel-shopping/` fallback — see the `meta-tools:plugin-data-storage` canonical skill) and survive plugin updates.
